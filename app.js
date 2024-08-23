@@ -1,37 +1,25 @@
 const express = require('express');
-const axios = require('axios');
-const dotenv = require('dotenv');
+const mongoose = require('mongoose');
+const multer = require('multer');
+const PlacasRoutes = require('./routes/PlacaRoutes');
 
-dotenv.config();
+require('dotenv').config();
 
 const app = express();
+app.use(express.json());
+app.use('/uploads', express.static('uploads')); // Para servir arquivos estáticos da pasta uploads
 
-app.get('/imagemOcr', async (req, res) => {
-    // URL da imagem que você quer processar
-    const imageUrl = 'https://www.sinalplast.com.br/wp-content/uploads/2016/05/SPF11.jpg';
 
-    // Configuração da requisição para a API
-    const options = {
-        method: 'GET',
-        url: `https://ocr-extract-text.p.rapidapi.com/ocr`,
-        params: { url: imageUrl }, // Parâmetro da imagem
-        headers: {
-            'X-RapidAPI-Key': process.env.X_RapidAPI_Key, // Certifique-se de que a chave está correta no .env
-            'X-RapidAPI-Host': 'ocr-extract-text.p.rapidapi.com'
-        }
-    };
+// Conectando ao MongoDB
+mongoose.connect(process.env.MONGO_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
+}).then(() => console.log('Conectado ao MongoDB'))
+  .catch(err => console.error('Erro ao conectar ao MongoDB', err));
 
-    try {
-        // Fazendo a requisição para a API
-        const response = await axios.request(options);
-        console.log(response.data.text);
-        res.json({ texto: response.data.text });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Erro ao processar a imagem' });
-    }
-});
+// Configurando rotas
+app.use('/api', PlacasRoutes); // Prefixo '/api' para rotas
 
-app.listen(3000, () => {
-    console.log('Servidor rodando na porta 3000');
+app.listen(process.env.PORT || 3000, () => {
+    console.log(`Servidor rodando na porta ${process.env.PORT || 3000}`);
 });

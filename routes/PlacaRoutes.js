@@ -1,206 +1,139 @@
 //PlacaRoutes
 const express = require('express');
 const multer = require('multer');
+const fs = require('fs');
+const FormData = require('@postman/form-data');
 const axios = require('axios');
+const Placa = require('../models/Placa'); // Ajuste o caminho para o modelo
 const PDFDocument = require('pdfkit');
-const Placa = require('../models/placa')
+
 const router = express.Router();
- const upload = require('../config/multer')
+const upload = multer({ dest: 'uploads/' });
 
-// Rota POST para '/cadastroPlaca'
-router.post('/cadastroPlaca', upload.single('foto'), async (req, res) => {
-    const { cidade } = req.body;
-    const imageUrl = req.file.path; // Obtém o caminho do arquivo carregado
+// URL da API OCR.Space
+const OCR_SPACE_DEFAULT_API = 'https://api.ocr.space/parse/image';
 
-    if (!imageUrl) {
-        return res.status(400).json({ message: 'Imagem não fornecida' });
+// Rota para upload de imagem e processamento OCR
+router.post('/cadastroPlaca', upload.single('image'), async (req, res) => {
+    const imagePath = req.file.path;
+    const cidade = req.body.cidade;
+
+    // Verifica se a chave da API está definida
+    const apiKey = process.env.OCR_SPACE_API_KEY;
+    if (!apiKey) {
+        return res.status(500).json({ error: 'Chave da API não definida' });
     }
 
+    // Criando o FormData para enviar o arquivo
+    const formData = new FormData();
+    formData.append('file', fs.createReadStream(imagePath));
+    formData.append('filetype', filetype); // Define o tipo de arquivo
+
+    // Configuração da requisição para a API OCR.Space
+    const options = {
+        method: 'POST',
+        url: OCR_SPACE_DEFAULT_API,
+        headers: {
+            apikey: apiKey,
+            ...formData.getHeaders()
+        },
+        data: formData
+    };
+
     try {
-        // Chama a API OCR para extrair o texto da imagem
-        const response = await axios.post('https://document-ocr1.p.rapidapi.com/idr', {
-            url: imageUrl
-        }, {
-            headers: {
-                'X-RapidAPI-Key': process.env.X_RAPIDAPI_KEY,
-                'X-RapidAPI-Host': 'document-ocr1.p.rapidapi.com'
-            }
+        // Fazendo a requisição para a API OCR.Space
+        const response = await axios.request(options);
+        console.log(response.data);
+
+        // Verifica se ParsedResults está presente e possui dados
+        const parsedText = response.data.ParsedResults[0]?.ParsedText || '';
+
+        // Ajusta a lógica para extrair o número da placa do texto reconhecido
+        const placaMatch = parsedText.match(/(?:[A-Z]{2,3}-?\d{4,6})|(?:[A-Z0-9]{7,10})/i);
+        const numeroPlaca = placaMatch ? placaMatch[0].replace(/[^A-Z0-9]/gi, '') : 'Número não encontrado';
+
+        // Verifica se o número da placa é válido (opcional)
+        if (numeroPlaca.length < 6 || numeroPlaca.length > 10) {
+            return res.status(400).json({ error: 'Número da placa não válido' });
+        }
+
+        // Criar um novo documento no MongoDB
+        const placa = new Placa({
+            numeroPlaca: numeroPlaca,
+            cidade: cidade
         });
 
-        const numeroPlaca = response.data.text.trim(); // Texto extraído da imagem
-
-        // Salva no banco de dados
-        const novaPlaca = new Placa({
-            numeroPlaca,
-            cidade
+        await placa.save();
+        res.json({
+            message: 'Informações salvas com sucesso!',
+            placa
         });
-
-        await novaPlaca.save();
-
-        res.status(201).json({ message: 'Placa cadastrada com sucesso!' });
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ message: 'Erro ao cadastrar placa' });
+        console.error('Erro na requisição:', error.message);
+        res.status(error.response?.status || 500).json({ error: error.response?.data || 'Erro ao processar a imagem' });
+    } finally {
+        fs.unlinkSync(imagePath); // Remove o arquivo temporário
     }
 });
 
-// Rota GET para '/relatorio/cidade/:cidade'
+// Rota para gerar o PDF com os registros da cidade
 router.get('/relatorio/cidade/:cidade', async (req, res) => {
-    const { cidade } = req.params;
+    const cidade = req.params.cidade;
 
     try {
-        const placas = await Placa.find({ cidade });
+        // Consulta o MongoDB para obter os registros da cidade
+        const placas = await Placa.find({ cidade: new RegExp(cidade, 'i') });
+
+        if (placas.length === 0) {
+            return res.status(404).json({ message: 'Nenhum registro encontrado para a cidade fornecida.' });
+        }
+
+        // Cria um novo documento PDF
         const doc = new PDFDocument();
 
-        res.setHeader('Content-disposition', 'attachment; filename=relatorio.pdf');
-        res.setHeader('Content-type', 'application/pdf');
+        // Define o cabeçalho do PDF
+        doc.fontSize(16).text(`Relatório para a cidade: ${cidade}`, { align: 'center' });
+        doc.moveDown();
 
-        doc.pipe(res);
-
-        doc.fontSize(25).text('Relatório de Placas', { align: 'center' });
-        doc.fontSize(15);
-
+        // Adiciona os registros no PDF
         placas.forEach(placa => {
-            doc.text(`Número da Placa: ${placa.numeroPlaca}`);
-            doc.text(`Cidade: ${placa.cidade}`);
+            doc.fontSize(12).text(`Número da Placa: ${placa.numeroPlaca}`);
             doc.text(`Data e Hora: ${placa.dataHora}`);
-            doc.text('----------------------');
+            doc.moveDown();
         });
 
+        // Envia o PDF como resposta
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', 'attachment; filename=relatorio_cidade.pdf');
+
+        doc.pipe(res);
         doc.end();
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ message: 'Erro ao gerar relatório' });
+        console.error('Erro ao gerar o PDF:', error.message);
+        res.status(500).json({ message: 'Erro ao gerar o PDF.' });
     }
 });
 
-// Rota GET para '/consulta/:placa'
+// Rota para consulta de placa
 router.get('/consulta/:placa', async (req, res) => {
-    const { placa } = req.params;
+    const placaNumber = req.params.placa.toUpperCase(); // Converte o número da placa para maiúsculas para evitar problemas com case sensitivity
 
     try {
-        const resultado = await Placa.findOne({ numeroPlaca: placa });
+        // Consulta o MongoDB para verificar se a placa existe
+        const placa = await Placa.findOne({ numeroPlaca: placaNumber });
 
-        if (resultado) {
-            res.status(200).json({ message: 'Placa encontrada', placa: resultado });
+        if (placa) {
+            return res.json({
+                message: 'Placa encontrada!',
+                placa
+            });
         } else {
-            res.status(404).json({ message: 'Placa não encontrada' });
+            return res.status(404).json({ message: 'Placa não encontrada.' });
         }
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ message: 'Erro ao consultar placa' });
+        console.error('Erro ao consultar a placa:', error.message);
+        res.status(500).json({ message: 'Erro ao consultar a placa.' });
     }
 });
 
 module.exports = router;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// Rota POST para '/cadastroPlaca'
-/*router.post('/cadastroPlaca', async (req, res) => {
-    const cidade = req.body.cidade; // Obtendo 'cidade' do corpo da requisição
-    
-    // Link da imagem fixo para teste
-    const imageURL = 'https://www.sinalplast.com.br/wp-content/uploads/2016/05/SPF11.jpg';
-    
-    if (!cidade) { // Verificando se 'cidade' foi fornecida
-        return res.status(400).json({ message: 'Cidade não fornecida.' });
-    }
-    
-    try {
-        // Chama a API OCR para extrair o texto da imagem
-        const response = await axios.post('https://ocr-extract-text.p.rapidapi.com/ocr', {
-            url: imageUrl
-        }, {
-            headers: {
-                'X-RapidAPI-Key': process.env.X_RAPIDAPI_KEY,
-                'X-RapidAPI-Host': 'ocr-extract-text.p.rapidapi.com'
-            }
-        });
-    
-        const numeroPlaca = response.data.text.trim(); // texto extraído da imagem
-
-    // Salva no banco de dados 
-    const novaPlaca = new Placa({
-        numeroPlaca,
-        cidade
-    })
-
-    await novaPlaca.save()
-
-    res.status(201).json({message: 'Placa cadastrada com Sucesso!'})
-}catch (erro){
-    console.error(error)
-    res.status(500).json({message: 'Erro ao cadastrar Placa'})
-} 
-})
-
-module.exports = router; */
-
-
-/*app.get('/imagemOcr', async (req, res) => {
-    // URL da imagem que você quer processar
-    const imageUrl = 'https://www.sinalplast.com.br/wp-content/uploads/2016/05/SPF11.jpg';
-
-    // Configuração da requisição para a API
-    const options = {
-        method: 'GET',
-        url: `https://ocr-extract-text.p.rapidapi.com/ocr`,
-        params: { url: imageUrl }, // Parâmetro da imagem
-        headers: {
-            'X-RapidAPI-Key': process.env.X_RapidAPI_Key, // Certifique-se de que a chave está correta no .env
-            'X-RapidAPI-Host': 'ocr-extract-text.p.rapidapi.com'
-        }
-    };
-
-    try {
-        // Fazendo a requisição para a API
-        const response = await axios.request(options);
-        console.log(response.data.text);
-        res.json({ texto: response.data.text });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Erro ao processar a imagem' });
-    }
-});
-
-app.listen(3000, () => {
-    console.log('Servidor rodando na porta 3000');
-});
-*/
-
-

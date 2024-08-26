@@ -1,4 +1,3 @@
-//PlacaRoutes
 const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
@@ -27,7 +26,7 @@ router.post('/cadastroPlaca', upload.single('image'), async (req, res) => {
     // Criando o FormData para enviar o arquivo
     const formData = new FormData();
     formData.append('file', fs.createReadStream(imagePath));
-    formData.append('filetype', filetype); // Define o tipo de arquivo
+    formData.append('filetype', 'PNG'); // Define o tipo de arquivo
 
     // Configuração da requisição para a API OCR.Space
     const options = {
